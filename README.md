@@ -11,7 +11,7 @@
 * Administrative privilges are not required
 
 # Features
-* Portable Executable (PE/PE+) authenticode hash calculation (MD5/SHA1/SHA256/SHA384/SHA512);
+* Portable Executable (PE32/PE32+) authenticode hash calculation (MD5/SHA1/SHA256/SHA384/SHA512);
 * WDAC compliant page hash calculation (image header only hash), SHA1/SHA256;
 * GUI and CLI version combined in single executable;
 * Drag and drop support for GUI version.

@@ -6,7 +6,7 @@
 *
 *  VERSION:     1.00
 *
-*  DATE:        01 Oct 2021
+*  DATE:        21 Oct 2021
 *
 *  AuthHashCalc main logic and entrypoint.
 *
@@ -44,10 +44,11 @@ static DLG_HASH_CTRL g_UserHashControls[] = {
 #define PROGRAM_VERSION_MAJOR       1
 #define PROGRAM_VERSION_MINOR       0
 #define PROGRAM_VERSION_REVISION    0
-#define PROGRAM_VERSION_BUILD       1
+#define PROGRAM_VERSION_BUILD       2
 
 static HANDLE g_Heap;
 static HINSTANCE g_hInstance;
+static BOOLEAN g_supportPH;
 
 typedef ULONG(WINAPI* pfnComputeFirstPageHash)(
     _In_ LPCWSTR lpszAlgoId,
@@ -381,6 +382,9 @@ LPWSTR ComputeHeaderPageHashForFile(
     ULONG hashSize = 0;
     PCNG_CTX hashContext;
 
+    if (ComputeFirstPageHash == NULL)
+        return NULL;
+
     hashContext = CreateHashContext(lpAlgId);
     if (hashContext) {
 
@@ -433,32 +437,35 @@ VOID ProcessFile(
     //
     // Page hashes (WDAC compliant, header only hash).
     //
-    if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl)) {
+    if (g_supportPH) {
 
-        lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA1_ALGORITHM);
-        if (lpszHash) {
+        if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl)) {
 
-            SetWindowText(g_UserHashControls[UserHashControlPageHashSha1].EditControl,
-                lpszHash);
+            lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA1_ALGORITHM);
+            if (lpszHash) {
 
-            supHeapFree(lpszHash);
+                SetWindowText(g_UserHashControls[UserHashControlPageHashSha1].EditControl,
+                    lpszHash);
+
+                supHeapFree(lpszHash);
+            }
+
+        }
+
+        if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl)) {
+
+            lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA256_ALGORITHM);
+            if (lpszHash) {
+
+                SetWindowText(g_UserHashControls[UserHashControlPageHashSha256].EditControl,
+                    lpszHash);
+
+                supHeapFree(lpszHash);
+            }
+
         }
 
     }
-
-    if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl)) {
-
-        lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA256_ALGORITHM);
-        if (lpszHash) {
-
-            SetWindowText(g_UserHashControls[UserHashControlPageHashSha256].EditControl,
-                lpszHash);
-
-            supHeapFree(lpszHash);
-        }
-
-    }
-
 }
 
 VOID OnCalculateClick(
@@ -559,8 +566,17 @@ VOID OnInitDialog(
             GetDlgItem(hwndDlg, g_UserHashControls[i].CheckBoxControlId);
 
         Button_SetCheck(g_UserHashControls[i].CheckBoxControl,
-            (i < UserHashControlPageHashSha256) ? TRUE : FALSE);
+            (i < UserHashControlPageHashSha1) ? TRUE : FALSE);
     }
+
+    EnableWindow(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl, g_supportPH);
+    EnableWindow(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl, g_supportPH);
+    EnableWindow(g_UserHashControls[UserHashControlPageHashSha1].EditControl, g_supportPH);
+    EnableWindow(g_UserHashControls[UserHashControlPageHashSha256].EditControl, g_supportPH);
+    EnableWindow(GetDlgItem(hwndDlg, g_UserHashControls[UserHashControlPageHashSha1].CopyControlId), g_supportPH);
+    EnableWindow(GetDlgItem(hwndDlg, g_UserHashControls[UserHashControlPageHashSha256].CopyControlId), g_supportPH);
+    Button_SetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl, g_supportPH);
+    Button_SetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl, g_supportPH);
 
     HICON hIcon = (HICON)LoadImage(g_hInstance,
         MAKEINTRESOURCE(IDI_ICONMAIN),
@@ -732,28 +748,32 @@ UINT ProcessFileCLI(
         }
     }
 
-    fprintf_s(lpOutStream, "\nFirst page hash:\n");
+    if (g_supportPH) {
 
-    LPCWSTR lpAlgId = BCRYPT_SHA1_ALGORITHM;
+        fprintf_s(lpOutStream, "\nFirst page hash:\n");
 
-    lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
-    if (lpszHash) {
-        fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
-        supHeapFree(lpszHash);
-    }
-    else {
-        fprintf_s(lpOutStream, "Error: empty page hash %ws value\n", lpAlgId);
-    }
+        LPCWSTR lpAlgId = BCRYPT_SHA1_ALGORITHM;
 
-    lpAlgId = BCRYPT_SHA256_ALGORITHM;
+        lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
+        if (lpszHash) {
+            fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
+            supHeapFree(lpszHash);
+        }
+        else {
+            fprintf_s(lpOutStream, "Error: empty page hash %ws value\n", lpAlgId);
+        }
 
-    lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
-    if (lpszHash) {
-        fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
-        supHeapFree(lpszHash);
-    }
-    else {
-        fprintf_s(lpOutStream, "Error: empty page hash %ws value\n", lpAlgId);
+        lpAlgId = BCRYPT_SHA256_ALGORITHM;
+
+        lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
+        if (lpszHash) {
+            fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
+            supHeapFree(lpszHash);
+        }
+        else {
+            fprintf_s(lpOutStream, "Error: empty page hash %ws value\n", lpAlgId);
+        }
+
     }
 
     return uResult;
@@ -850,9 +870,11 @@ BOOLEAN InitializeGlobals(
     if (hModule == NULL)
         return FALSE;
 
+    //
+    // Windows 7 miss this API.
+    //
     ComputeFirstPageHash = (pfnComputeFirstPageHash)GetProcAddress(hModule, "ComputeFirstPageHash");
-    if (ComputeFirstPageHash == NULL)
-        return FALSE;
+    g_supportPH = (ComputeFirstPageHash != NULL);
 
     return TRUE;
 }
