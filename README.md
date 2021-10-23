@@ -8,7 +8,7 @@
 # System Requirements
 
 * x86/x64 Windows 7/8/8.1/10/11
-* Administrative privilges are not required
+* Administrative privileges are not required
 
 # Features
 * Portable Executable (PE32/PE32+) authenticode hash calculation (MD5/SHA1/SHA256/SHA384/SHA512);
