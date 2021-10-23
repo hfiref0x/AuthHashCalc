@@ -4,9 +4,9 @@
 *
 *  TITLE:       SUP.CPP
 *
-*  VERSION:     1.00
+*  VERSION:     1.03
 *
-*  DATE:        01 Oct 2021
+*  DATE:        21 Oct 2021
 *
 *  Program global support routines.
 *
@@ -18,6 +18,10 @@
 *******************************************************************************/
 
 #include "global.h"
+
+#define RTL_MEG                   (1024UL * 1024UL)
+#define RTLP_IMAGE_MAX_DOS_HEADER (256UL * RTL_MEG)
+
 
 __inline WCHAR nibbletoh(BYTE c, BOOLEAN upcase)
 {
@@ -129,22 +133,91 @@ VOID supClipboardCopy(
     }
 }
 
+VOID supDestroyFileViewInfo(
+    _In_ PFILE_VIEW_INFO ViewInformation
+)
+{
+    if (ViewInformation->FileHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(ViewInformation->FileHandle);
+        ViewInformation->FileHandle = INVALID_HANDLE_VALUE;
+    }
+    if (ViewInformation->SectionHandle) {
+        NtClose(ViewInformation->SectionHandle);
+        ViewInformation->SectionHandle = NULL;
+    }
+    if (ViewInformation->ViewBase) {
+        if (NT_SUCCESS(NtUnmapViewOfSection(NtCurrentProcess(),
+            ViewInformation->ViewBase)))
+        {
+            ViewInformation->ViewBase = NULL;
+            ViewInformation->ViewSize = 0;
+        }
+    }
+
+    ViewInformation->NtHeaders = NULL;
+    ViewInformation->FileSize.QuadPart = 0;
+}
+
 /*
-* supUnmapFileSection
+* supxInitializeFileViewInfo
 *
 * Purpose:
 *
-* Unmap previously mapped file section.
+* Open file for mapping, create section, remember file size.
 *
 */
-VOID supUnmapFileSection(
-    _In_ PVOID MappedSection
+NTSTATUS supxInitializeFileViewInfo(
+    _In_ PFILE_VIEW_INFO ViewInformation
 )
 {
-    NTSTATUS ntStatus = NtUnmapViewOfSection(NtCurrentProcess(),
-        MappedSection);
+    NTSTATUS ntStatus = STATUS_SUCCESS;
+    HANDLE fileHandle, sectionHandle = NULL;
+    LARGE_INTEGER fileSize;
 
-    RtlSetLastWin32Error(RtlNtStatusToDosError(ntStatus));
+    fileSize.QuadPart = 0;
+    fileHandle = CreateFile(ViewInformation->FileName,
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_SUPPORTS_BLOCK_REFCOUNTING | FILE_ATTRIBUTE_NORMAL,
+        NULL);
+
+    if (fileHandle != INVALID_HANDLE_VALUE) {
+
+        if (!GetFileSizeEx(fileHandle, &fileSize)) {
+            CloseHandle(fileHandle);
+            fileHandle = INVALID_HANDLE_VALUE;
+            ntStatus = STATUS_FILE_INVALID;
+        }
+        else {
+
+            ntStatus = NtCreateSection(
+                &sectionHandle,
+                SECTION_QUERY | SECTION_MAP_READ,
+                NULL,
+                &fileSize,
+                PAGE_READONLY,
+                SEC_COMMIT,
+                fileHandle);
+
+            if (!NT_SUCCESS(ntStatus)) {
+                CloseHandle(fileHandle);
+                fileHandle = INVALID_HANDLE_VALUE;
+            }
+
+        }
+
+    }
+    else {
+        ntStatus = STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    ViewInformation->FileHandle = fileHandle;
+    ViewInformation->FileSize = fileSize;
+    ViewInformation->SectionHandle = sectionHandle;
+
+    return ntStatus;
 }
 
 /*
@@ -155,80 +228,52 @@ VOID supUnmapFileSection(
 * Create mapped section from input file.
 *
 */
-PVOID supMapInputFileForRead(
-    _In_ LPCWSTR lpFileName,
-    _Out_opt_ PSIZE_T lpFileSize
+NTSTATUS supMapInputFileForRead(
+    _In_ PFILE_VIEW_INFO ViewInformation,
+    _In_ BOOLEAN PartialMap
 )
 {
-    HANDLE fileHandle, sectionHandle = NULL;
-    PVOID pvImageBase = NULL;
-    LARGE_INTEGER fileSize;
+    NTSTATUS ntStatus;
     SIZE_T viewSize;
-
-    if (lpFileSize)
-        *lpFileSize = 0;
-
-    fileHandle = CreateFile(lpFileName,
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
-
-    if (fileHandle == INVALID_HANDLE_VALUE)
-        return NULL;
 
     do {
 
-        fileSize.QuadPart = 0;
-        if (!GetFileSizeEx(fileHandle, &fileSize))
+        ntStatus = supxInitializeFileViewInfo(ViewInformation);
+        if (!NT_SUCCESS(ntStatus))
             break;
 
-        NTSTATUS ntStatus = NtCreateSection(
-            &sectionHandle,
-            SECTION_QUERY | SECTION_MAP_READ,
-            NULL,
-            &fileSize,
-            PAGE_READONLY,
-            SEC_COMMIT,
-            fileHandle);
+        if (PartialMap) {
 
-        if (!NT_SUCCESS(ntStatus)) {
-            RtlSetLastWin32Error(RtlNtStatusToDosError(ntStatus));
-            break;
+            if (ViewInformation->FileSize.QuadPart < RTL_MEG)
+                viewSize = (SIZE_T)ViewInformation->FileSize.QuadPart;
+            else
+                viewSize = (SIZE_T)RTL_MEG;
+
+        }
+        else {
+
+            viewSize = (SIZE_T)ViewInformation->FileSize.QuadPart;
+
         }
 
-        viewSize = (SIZE_T)fileSize.QuadPart;
-
-        ntStatus = NtMapViewOfSection(sectionHandle,
+        ntStatus = NtMapViewOfSection(ViewInformation->SectionHandle,
             NtCurrentProcess(),
-            &pvImageBase,
+            &ViewInformation->ViewBase,
             0,
-            PAGE_SIZE,
+            0,
             NULL,
             &viewSize,
-            ViewUnmap,
+            ViewShare,
             0,
             PAGE_READONLY);
 
-        if (!NT_SUCCESS(ntStatus)) {
-            RtlSetLastWin32Error(RtlNtStatusToDosError(ntStatus));
-            break;
-        }
+        if (NT_SUCCESS(ntStatus))
+            ViewInformation->ViewSize = viewSize;
 
-        if (lpFileSize)
-            *lpFileSize = (SIZE_T)fileSize.QuadPart;
 
     } while (FALSE);
 
-    if (fileHandle != INVALID_HANDLE_VALUE)
-        CloseHandle(fileHandle);
-
-    if (sectionHandle != NULL)
-        NtClose(sectionHandle);
-
-    return pvImageBase;
+    return ntStatus;
 }
 
 /*
@@ -320,8 +365,59 @@ BOOL supDragAndDropResolveTarget(
     return bResult;
 }
 
-#define RTL_MEG                   (1024UL * 1024UL)
-#define RTLP_IMAGE_MAX_DOS_HEADER (256UL * RTL_MEG)
+//
+// Major copy-paste.
+//
+#define MM_SIZE_OF_LARGEST_IMAGE ((ULONG)0x77000000)
+#define MM_MAXIMUM_IMAGE_HEADER (2 * PAGE_SIZE)
+#define MM_MAXIMUM_IMAGE_SECTIONS                       \
+     ((MM_MAXIMUM_IMAGE_HEADER - (PAGE_SIZE + sizeof(IMAGE_NT_HEADERS))) /  \
+            sizeof(IMAGE_SECTION_HEADER))
+
+#define VALIDATE_NTHEADER(Hdr) {                                    \
+    if (((((Hdr)->OptionalHeader).FileAlignment & 511) != 0) &&     \
+        (((Hdr)->OptionalHeader).FileAlignment !=                   \
+         ((Hdr)->OptionalHeader).SectionAlignment)) {               \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((Hdr)->OptionalHeader).FileAlignment == 0) {               \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((((Hdr)->OptionalHeader).SectionAlignment - 1) &           \
+          ((Hdr)->OptionalHeader).SectionAlignment) != 0) {         \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((((Hdr)->OptionalHeader).FileAlignment - 1) &              \
+          ((Hdr)->OptionalHeader).FileAlignment) != 0) {            \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((Hdr)->OptionalHeader).SectionAlignment < ((Hdr)->OptionalHeader).FileAlignment) { \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((Hdr)->OptionalHeader).SizeOfImage > MM_SIZE_OF_LARGEST_IMAGE) { \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if ((Hdr)->FileHeader.NumberOfSections > MM_MAXIMUM_IMAGE_SECTIONS) { \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((Hdr)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) && \
+        !((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_I386))  { \
+        return FALSE;                                               \
+    }                                                               \
+                                                                    \
+    if (((Hdr)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) && \
+        !(((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_IA64) || \
+          ((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64))) { \
+        return FALSE;                                               \
+    }                                                               \
+}
 
 /*
 * supIsValidImage
@@ -333,59 +429,62 @@ BOOL supDragAndDropResolveTarget(
 */
 BOOLEAN supIsValidImage(
     _In_ PVOID ImageBase,
-    _In_ SIZE_T ImageSize
+    _In_ LARGE_INTEGER EndOfFile
 )
 {
     PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)ImageBase;
     PIMAGE_NT_HEADERS ntHeaders = NULL;
 
-    WORD wMachine, wMagic;
+    SetLastError(ERROR_BAD_EXE_FORMAT);
 
     __try {
 
         if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-            SetLastError(ERROR_BAD_EXE_FORMAT);
             return FALSE;
         }
 
         if (dosHeader->e_lfanew == 0 ||
-            (SIZE_T)dosHeader->e_lfanew > ImageSize ||
+            (ULONG)dosHeader->e_lfanew > EndOfFile.LowPart ||
             dosHeader->e_lfanew >= RTLP_IMAGE_MAX_DOS_HEADER)
         {
-            SetLastError(ERROR_BAD_FORMAT);
+            return FALSE;
+        }
+
+        if (((ULONG)dosHeader->e_lfanew +
+            sizeof(IMAGE_NT_HEADERS) +
+            (16 * sizeof(IMAGE_SECTION_HEADER))) <= (ULONG)dosHeader->e_lfanew)
+        {
             return FALSE;
         }
 
         ntHeaders = (PIMAGE_NT_HEADERS)((PCHAR)ImageBase + dosHeader->e_lfanew);
 
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
-            SetLastError(ERROR_INVALID_EXE_SIGNATURE);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE ||
+            ntHeaders->FileHeader.SizeOfOptionalHeader == 0 ||
+            ntHeaders->FileHeader.SizeOfOptionalHeader & (sizeof(ULONG_PTR) - 1))
+        {
             return FALSE;
         }
 
-        wMachine = ntHeaders->FileHeader.Machine;
+        if (!(ntHeaders->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE)) {
+            return FALSE;
+        }
 
-        if ((wMachine != IMAGE_FILE_MACHINE_AMD64) &&
-            (wMachine != IMAGE_FILE_MACHINE_I386))
+        if (ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 &&
+            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_I386)
         {
             SetLastError(ERROR_IMAGE_MACHINE_TYPE_MISMATCH);
             return FALSE;
         }
 
-        wMagic = ntHeaders->OptionalHeader.Magic;
-
-        if (wMachine == IMAGE_FILE_MACHINE_I386) {
-            if (wMagic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
-                SetLastError(ERROR_IMAGE_MACHINE_TYPE_MISMATCH);
-                return FALSE;
-            }
+        if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+            VALIDATE_NTHEADER((PIMAGE_NT_HEADERS32)ntHeaders);
         }
-        else {
-            if (wMagic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-                SetLastError(ERROR_IMAGE_MACHINE_TYPE_MISMATCH);
-                return FALSE;
-            }
+        else if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+            VALIDATE_NTHEADER((PIMAGE_NT_HEADERS64)ntHeaders);
         }
+        else
+            return FALSE;
 
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {

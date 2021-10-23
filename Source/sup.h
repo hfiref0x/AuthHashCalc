@@ -4,9 +4,9 @@
 *
 *  TITLE:       SUP.H
 *
-*  VERSION:     1.00
+*  VERSION:     1.03
 *
-*  DATE:        01 Oct 2021
+*  DATE:        21 Oct 2021
 *
 *  Support routines header file.
 *
@@ -18,6 +18,19 @@
 *******************************************************************************/
 #pragma once
 
+typedef struct _FILE_VIEW_INFO {
+    LPCWSTR FileName;
+    HANDLE FileHandle;
+    HANDLE SectionHandle;
+    PVOID ViewBase;
+    SIZE_T ViewSize;
+    LARGE_INTEGER FileSize;
+    PIMAGE_NT_HEADERS NtHeaders;
+} FILE_VIEW_INFO, * PFILE_VIEW_INFO;
+
+VOID supDestroyFileViewInfo(
+    _In_ PFILE_VIEW_INFO ViewInformation);
+
 PVOID supHeapAlloc(
     _In_ SIZE_T Size);
 
@@ -28,12 +41,9 @@ VOID supClipboardCopy(
     _In_ LPCWSTR lpText,
     _In_ SIZE_T cbText);
 
-VOID supUnmapFileSection(
-    _In_ PVOID MappedSection);
-
-PVOID supMapInputFileForRead(
-    _In_ LPCWSTR lpFileName,
-    _Out_opt_ PSIZE_T lpFileSize);
+NTSTATUS supMapInputFileForRead(
+    _In_ PFILE_VIEW_INFO ViewInformation,
+    _In_ BOOLEAN PartialMap);
 
 BOOL supOpenDialogExecute(
     _In_ HWND OwnerWindow,
@@ -48,7 +58,7 @@ BOOL supDragAndDropResolveTarget(
 
 BOOLEAN supIsValidImage(
     _In_ PVOID ImageBase,
-    _In_ SIZE_T ImageSize);
+    _In_ LARGE_INTEGER EndOfFile);
 
 LPWSTR supPrintHash(
     _In_reads_bytes_(Length) LPBYTE Buffer,

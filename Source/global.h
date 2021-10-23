@@ -4,9 +4,9 @@
 *
 *  TITLE:       GLOBAL.H
 *
-*  VERSION:     1.00
+*  VERSION:     1.03
 *
-*  DATE:        01 Oct 2021
+*  DATE:        21 Oct 2021
 *
 *  Common include header file.
 *
@@ -23,16 +23,18 @@
 #error ANSI build is not supported
 #endif
 
+#pragma warning(disable: 4005)
+
 #include <Windows.h>
 #include <Windowsx.h>
 #include <strsafe.h>
 #include <bcrypt.h>
-#include <intrin.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <VersionHelpers.h>
+#include <ntstatus.h>
 #include "ntos.h"
 #include "sup.h"
 #include "resource.h"

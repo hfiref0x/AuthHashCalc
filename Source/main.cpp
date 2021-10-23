@@ -4,7 +4,7 @@
 *
 *  TITLE:       MAIN.CPP
 *
-*  VERSION:     1.00
+*  VERSION:     1.03
 *
 *  DATE:        21 Oct 2021
 *
@@ -43,23 +43,14 @@ static DLG_HASH_CTRL g_UserHashControls[] = {
 
 #define PROGRAM_VERSION_MAJOR       1
 #define PROGRAM_VERSION_MINOR       0
-#define PROGRAM_VERSION_REVISION    0
-#define PROGRAM_VERSION_BUILD       2
+#define PROGRAM_VERSION_REVISION    1
+#define PROGRAM_VERSION_BUILD       3
 
 static HANDLE g_Heap;
 static HINSTANCE g_hInstance;
-static BOOLEAN g_supportPH;
-
-typedef ULONG(WINAPI* pfnComputeFirstPageHash)(
-    _In_ LPCWSTR lpszAlgoId,
-    _In_ LPCWSTR lpFileName,
-    _Inout_ PVOID Hash,
-    _In_ ULONG HashSize);
-
-pfnComputeFirstPageHash ComputeFirstPageHash;
+static SYSTEM_INFO g_SystemInfo;
 
 #define T_EMPTY_STRING TEXT("")
-#define WINTRUST_DLL TEXT("wintrust.dll")
 
 VOID OnBrowseClick(
     _In_ HWND hwndDlg);
@@ -67,6 +58,148 @@ VOID OnBrowseClick(
 VOID OnCalculateClick(
     _In_ HWND hwndDlg);
 
+#define HashUnloadFile(ViewInformation) supDestroyFileViewInfo(ViewInformation)
+
+/*
+* HashLoadFile
+*
+* Purpose:
+*
+* Load PE file in memory and validate it structure
+*
+*/
+BOOLEAN HashLoadFile(
+    _In_ PFILE_VIEW_INFO ViewInformation,
+    _In_ BOOLEAN PartialMap
+)
+{
+    NTSTATUS ntStatus;
+    DWORD lastError;
+
+    ntStatus = supMapInputFileForRead(ViewInformation, PartialMap);
+    if (!NT_SUCCESS(ntStatus)) {
+        supDestroyFileViewInfo(ViewInformation);
+        SetLastError(RtlNtStatusToDosError(ntStatus));
+        return FALSE;
+    }
+
+    if (!supIsValidImage(
+        ViewInformation->ViewBase,
+        ViewInformation->FileSize))
+    {
+        lastError = GetLastError();
+        supDestroyFileViewInfo(ViewInformation);
+        SetLastError(lastError);
+        return FALSE;
+    }
+
+    ViewInformation->NtHeaders = RtlImageNtHeader(ViewInformation->ViewBase);
+    if (ViewInformation->NtHeaders == NULL) {
+        SetLastError(ERROR_BAD_FORMAT);
+        supDestroyFileViewInfo(ViewInformation);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+* HashGetExcludeRange
+*
+* Purpose:
+*
+* Retrieve data and offsets to be skipped during hash calculation
+*
+*/
+BOOLEAN HashGetExcludeRange(
+    _In_ PIMAGE_DOS_HEADER DosHeader,
+    _In_ PIMAGE_NT_HEADERS NtHeaders,
+    _Out_ PULONG ChecksumOffset,
+    _Out_ PULONG SecurityDirectoryOffset,
+    _Out_opt_ PIMAGE_DATA_DIRECTORY* DataDirectory
+)
+{
+    BOOLEAN bResult = TRUE;
+    ULONG securityOffset = 0, checksumOffset = 0;
+    PIMAGE_DATA_DIRECTORY dataDirectory = NULL;
+
+    PIMAGE_OPTIONAL_HEADER64 opt64 = NULL;
+    PIMAGE_OPTIONAL_HEADER32 opt32 = NULL;
+
+    switch (NtHeaders->OptionalHeader.Magic) {
+
+    case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+
+        checksumOffset = DosHeader->e_lfanew +
+            UFIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader.CheckSum);
+        securityOffset = DosHeader->e_lfanew +
+            UFIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]);
+
+        opt64 = (PIMAGE_OPTIONAL_HEADER64)&NtHeaders->OptionalHeader;
+        dataDirectory = &opt64->DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+
+        break;
+
+    case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+
+        checksumOffset = DosHeader->e_lfanew +
+            UFIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader.CheckSum);
+        securityOffset = DosHeader->e_lfanew +
+            UFIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]);
+
+        opt32 = (PIMAGE_OPTIONAL_HEADER32)&NtHeaders->OptionalHeader;
+        dataDirectory = &opt32->DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+
+        break;
+
+    default:
+        break;
+    }
+
+    *ChecksumOffset = checksumOffset;
+    *SecurityDirectoryOffset = securityOffset;
+
+    if (DataDirectory)
+        *DataDirectory = dataDirectory;
+
+    return bResult;
+}
+
+/*
+* HashGetSizeOfHeaders
+*
+* Purpose:
+*
+* Return PE OptionalHeader size of headers
+*
+*/
+DWORD HashGetSizeOfHeaders(
+    _In_ PIMAGE_NT_HEADERS NtHeaders
+)
+{
+    PIMAGE_OPTIONAL_HEADER64 opt64;
+    PIMAGE_OPTIONAL_HEADER32 opt32;
+
+    switch (NtHeaders->OptionalHeader.Magic) {
+    case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+        opt64 = (PIMAGE_OPTIONAL_HEADER64)&NtHeaders->OptionalHeader;
+        return opt64->SizeOfHeaders;
+    case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+        opt32 = (PIMAGE_OPTIONAL_HEADER32)&NtHeaders->OptionalHeader;
+        return opt32->SizeOfHeaders;
+    }
+
+    return 0;
+}
+
+/*
+* CreateHashContext
+*
+* Purpose:
+*
+* Allocate CNG context for given algorithm
+*
+*/
 PCNG_CTX CreateHashContext(
     _In_ PCWSTR lpAlgId
 )
@@ -162,6 +295,14 @@ PCNG_CTX CreateHashContext(
     return NULL;
 }
 
+/*
+* DestroyHashContext
+*
+* Purpose:
+*
+* Release all resources allocated for CNG context
+*
+*/
 VOID DestroyHashContext(
     _In_ PCNG_CTX Context
 )
@@ -178,67 +319,142 @@ VOID DestroyHashContext(
     HeapFree(g_Heap, 0, Context);
 }
 
-BOOLEAN CalculateAuthenticodeHash(
+/*
+* CalculateFirstPageHash
+*
+* Purpose:
+*
+* Compute page hash for PE headers (WDAC compliant)
+*
+*/
+BOOLEAN CalculateFirstPageHash(
     _In_ PVOID ImageBase,
-    _In_ SIZE_T MappedSize,
+    _In_ LARGE_INTEGER EndOfFile,
+    _In_ PIMAGE_NT_HEADERS NtHeaders,
+    _In_ DWORD SizeOfHeaders,
     _In_ PCNG_CTX HashContext
 )
 {
-    WORD fileMagic;
-    ULONG securityOffset, checksumOffset;
-    ULONG64 fileOffset = 0;
-    PIMAGE_DATA_DIRECTORY dataDirectory;
-
-    PIMAGE_OPTIONAL_HEADER64 opt64 = NULL;
-    PIMAGE_OPTIONAL_HEADER32 opt32 = NULL;
-
-    PIMAGE_DOS_HEADER dosHeader;
-    PIMAGE_NT_HEADERS ntHeaders = RtlImageNtHeader(ImageBase);
+    ULONG securityOffset, checksumOffset, cbInput;
+    ULONG fileOffset = 0;
+    NTSTATUS ntStatus = STATUS_SUCCESS;
+    BOOLEAN bOk = FALSE;
 
     SetLastError(ERROR_BAD_FORMAT);
 
-    if (ntHeaders == NULL)
-        return FALSE;
-
-    fileMagic = ntHeaders->OptionalHeader.Magic;
-
-    dosHeader = (PIMAGE_DOS_HEADER)ImageBase;
-
-    switch (fileMagic) {
-
-    case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
-
-        checksumOffset = dosHeader->e_lfanew +
-            UFIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader.CheckSum);
-        securityOffset = dosHeader->e_lfanew +
-            UFIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]);
-
-        opt64 = (PIMAGE_OPTIONAL_HEADER64)&ntHeaders->OptionalHeader;
-        dataDirectory = &opt64->DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
-
-        break;
-
-    case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
-
-        checksumOffset = dosHeader->e_lfanew +
-            UFIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader.CheckSum);
-        securityOffset = dosHeader->e_lfanew +
-            UFIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]);
-
-        opt32 = (PIMAGE_OPTIONAL_HEADER32)&ntHeaders->OptionalHeader;
-        dataDirectory = &opt32->DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
-
-        break;
-
-    default:
+    if (!HashGetExcludeRange((PIMAGE_DOS_HEADER)ImageBase,
+        NtHeaders,
+        &checksumOffset,
+        &securityOffset,
+        NULL))
+    {
         return FALSE;
     }
 
-    BOOLEAN bOk = FALSE;
-
     __try {
 
-        NTSTATUS ntStatus;
+        //
+        // Handle checksum offset.
+        //
+        cbInput = checksumOffset;
+
+        ntStatus = BCryptHashData(HashContext->HashHandle,
+            (PUCHAR)ImageBase, cbInput, 0);
+
+        if (!NT_SUCCESS(ntStatus))
+            __leave;
+
+        //
+        // Handle security offset.
+        //
+        fileOffset = checksumOffset +
+            RTL_FIELD_SIZE(IMAGE_OPTIONAL_HEADER, CheckSum);
+
+        cbInput = securityOffset - fileOffset;
+
+        ntStatus = BCryptHashData(HashContext->HashHandle,
+            (PUCHAR)RtlOffsetToPointer(ImageBase, fileOffset), cbInput, 0);
+
+        if (!NT_SUCCESS(ntStatus))
+            __leave;
+
+        fileOffset = securityOffset +
+            sizeof(IMAGE_DATA_DIRECTORY);
+
+        cbInput = SizeOfHeaders - fileOffset;
+
+        //
+        // Handle rest of the headers.
+        //
+        ntStatus = BCryptHashData(HashContext->HashHandle,
+            (PUCHAR)RtlOffsetToPointer(ImageBase, fileOffset), cbInput, 0);
+
+        if (!NT_SUCCESS(ntStatus))
+            __leave;
+
+        fileOffset = SizeOfHeaders;
+        cbInput = EndOfFile.LowPart - fileOffset;
+
+        //
+        // Handle rest of the buffer.
+        //
+        ntStatus = BCryptHashData(HashContext->HashHandle,
+            (PUCHAR)RtlOffsetToPointer(ImageBase, fileOffset), cbInput, 0);
+
+        if (!NT_SUCCESS(ntStatus))
+            __leave;
+
+        ntStatus = BCryptFinishHash(HashContext->HashHandle,
+            (PUCHAR)HashContext->Hash,
+            HashContext->HashSize,
+            0);
+
+        bOk = NT_SUCCESS(ntStatus);
+        RtlSetLastWin32Error(RtlNtStatusToDosError(ntStatus));
+    }
+    __finally {
+
+        if (AbnormalTermination())
+            return FALSE;
+
+    }
+
+    return bOk;
+}
+
+/*
+* CalculateAuthenticodeHash
+*
+* Purpose:
+*
+* Compute authenticode hash for image file
+*
+*/
+BOOLEAN CalculateAuthenticodeHash(
+    _In_ PVOID ImageBase,
+    _In_ LARGE_INTEGER EndOfFile,
+    _In_ PIMAGE_NT_HEADERS NtHeaders,
+    _In_ PCNG_CTX HashContext
+)
+{
+    ULONG securityOffset, checksumOffset;
+    ULONG fileOffset = 0;
+    PIMAGE_DATA_DIRECTORY dataDirectory;
+    BOOLEAN bOk = FALSE;
+    NTSTATUS ntStatus;
+
+    SetLastError(ERROR_BAD_FORMAT);
+
+    if (!HashGetExcludeRange((PIMAGE_DOS_HEADER)ImageBase,
+        NtHeaders,
+        &checksumOffset,
+        &securityOffset,
+        &dataDirectory))
+    {
+        return FALSE;
+    }
+
+    __try {
 
         while (fileOffset < checksumOffset) {
 
@@ -280,7 +496,7 @@ BOOLEAN CalculateAuthenticodeHash(
 
         fileOffset += dataDirectory->Size;
 
-        while (fileOffset < MappedSize) {
+        while (fileOffset < EndOfFile.LowPart) {
 
             ntStatus = BCryptHashData(HashContext->HashHandle,
                 (PUCHAR)RtlOffsetToPointer(ImageBase, fileOffset), sizeof(BYTE), 0);
@@ -310,6 +526,84 @@ BOOLEAN CalculateAuthenticodeHash(
     return bOk;
 }
 
+LPWSTR ComputeAuthenticodeHashForFile(
+    _In_ PFILE_VIEW_INFO ViewInformation,
+    _In_ LPCWSTR lpAlgId
+)
+{
+    PCNG_CTX hashContext;
+    LPWSTR lpszHash = NULL;
+
+    hashContext = CreateHashContext(lpAlgId);
+    if (hashContext) {
+
+        if (CalculateAuthenticodeHash(
+            ViewInformation->ViewBase,
+            ViewInformation->FileSize,
+            ViewInformation->NtHeaders,
+            hashContext))
+        {
+            lpszHash = (LPWSTR)supPrintHash((PUCHAR)hashContext->Hash,
+                hashContext->HashSize,
+                TRUE);
+        }
+
+        DestroyHashContext(hashContext);
+    }
+
+    return lpszHash;
+}
+
+LPWSTR ComputeHeaderPageHashForFile(
+    _In_ PFILE_VIEW_INFO ViewInformation,
+    _In_ LPCWSTR lpAlgId
+)
+{
+    PCNG_CTX hashContext;
+    LPWSTR lpszHash = NULL;
+    UCHAR* buffer;
+    LARGE_INTEGER fsz;
+    DWORD sizeOfHeaders;
+
+    sizeOfHeaders = HashGetSizeOfHeaders(ViewInformation->NtHeaders);
+    if (sizeOfHeaders == 0 || sizeOfHeaders > g_SystemInfo.dwPageSize)
+        return NULL;
+
+    hashContext = CreateHashContext(lpAlgId);
+    if (hashContext) {
+
+        fsz.LowPart = g_SystemInfo.dwPageSize;
+        buffer = (UCHAR*)supHeapAlloc(fsz.LowPart);
+        if (buffer) {
+
+            //
+            // Copy headers only, leave rest with zeroes.
+            //
+            RtlCopyMemory(buffer,
+                ViewInformation->ViewBase,
+                sizeOfHeaders);
+
+            if (CalculateFirstPageHash(
+                buffer,
+                fsz,
+                ViewInformation->NtHeaders,
+                sizeOfHeaders,
+                hashContext))
+            {
+                lpszHash = (LPWSTR)supPrintHash((PUCHAR)hashContext->Hash,
+                    hashContext->HashSize,
+                    TRUE);
+            }
+
+            supHeapFree(buffer);
+        }
+
+        DestroyHashContext(hashContext);
+    }
+
+    return lpszHash;
+}
+
 VOID ResetUserHashControls()
 {
     for (UINT i = 0; i < UserHashControlsCount; i++)
@@ -334,79 +628,8 @@ VOID OnBrowseClick(
     }
 }
 
-LPWSTR ComputeAuthenticodeHashForFile(
-    _In_ LPCWSTR lpFileName,
-    _In_ LPCWSTR lpAlgId
-)
-{
-    PVOID pvImageBase;
-    PCNG_CTX hashContext;
-    SIZE_T imageSize = 0;
-    LPWSTR lpszHash = NULL;
-
-    pvImageBase = supMapInputFileForRead(lpFileName, &imageSize);
-    if (pvImageBase == NULL) {
-        return NULL;
-    }
-
-    if (supIsValidImage(pvImageBase, imageSize)) {
-
-        hashContext = CreateHashContext(lpAlgId);
-        if (hashContext) {
-
-            if (CalculateAuthenticodeHash(pvImageBase,
-                imageSize,
-                hashContext))
-            {
-                lpszHash = (LPWSTR)supPrintHash((PUCHAR)hashContext->Hash,
-                    hashContext->HashSize,
-                    TRUE);
-            }
-
-            DestroyHashContext(hashContext);
-        }
-
-    }
-
-    supUnmapFileSection(pvImageBase);
-
-    return lpszHash;
-}
-
-LPWSTR ComputeHeaderPageHashForFile(
-    _In_ LPCWSTR lpFileName,
-    _In_ LPCWSTR lpAlgId
-)
-{
-    LPWSTR lpszHash = NULL;
-    ULONG hashSize = 0;
-    PCNG_CTX hashContext;
-
-    if (ComputeFirstPageHash == NULL)
-        return NULL;
-
-    hashContext = CreateHashContext(lpAlgId);
-    if (hashContext) {
-
-        hashSize = hashContext->HashSize;
-
-        if (hashSize == ComputeFirstPageHash(lpAlgId,
-            lpFileName,
-            hashContext->Hash,
-            hashContext->HashSize))
-        {
-            lpszHash = (LPWSTR)supPrintHash((PUCHAR)hashContext->Hash,
-                hashContext->HashSize,
-                TRUE);
-        }
-
-        DestroyHashContext(hashContext);
-    }
-
-    return lpszHash;
-}
-
 VOID ProcessFile(
+    _In_ HWND hwndDlg,
     _In_ LPCWSTR lpFileName
 )
 {
@@ -420,51 +643,76 @@ VOID ProcessFile(
         BCRYPT_SHA512_ALGORITHM
     };
 
-    for (UINT i = 0; i < UserHashControlPageHashSha1; i++) {
-        if (Button_GetCheck(g_UserHashControls[i].CheckBoxControl)) {
-            lpszHash = ComputeAuthenticodeHashForFile(lpFileName, cryptAlgoIdRef[i]);
-            if (lpszHash) {
-                SetWindowText(g_UserHashControls[i].EditControl, lpszHash);
-                supHeapFree(lpszHash);
+    FILE_VIEW_INFO fvi;
+
+    //
+    // Disable controls.
+    //
+    __try {
+        EnableWindow(GetDlgItem(hwndDlg, IDC_BROWSE), FALSE);
+        EnableWindow(GetDlgItem(hwndDlg, IDOK), FALSE);
+
+        RtlSecureZeroMemory(&fvi, sizeof(fvi));
+
+        fvi.FileName = lpFileName;
+
+        if (HashLoadFile(&fvi, FALSE)) {
+
+            for (UINT i = 0; i < UserHashControlPageHashSha1; i++) {
+                if (Button_GetCheck(g_UserHashControls[i].CheckBoxControl)) {
+                    lpszHash = ComputeAuthenticodeHashForFile(&fvi, cryptAlgoIdRef[i]);
+                    if (lpszHash) {
+                        SetWindowText(g_UserHashControls[i].EditControl, lpszHash);
+                        supHeapFree(lpszHash);
+                    }
+                    else {
+                        SetWindowText(g_UserHashControls[i].EditControl, T_EMPTY_STRING);
+                    }
+                }
             }
-            else {
-                SetWindowText(g_UserHashControls[i].EditControl, T_EMPTY_STRING);
+
+
+            //
+            // Page hashes (WDAC compliant, header only hash).
+            //
+
+            if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl)) {
+
+                lpszHash = ComputeHeaderPageHashForFile(&fvi, BCRYPT_SHA1_ALGORITHM);
+                if (lpszHash) {
+
+                    SetWindowText(g_UserHashControls[UserHashControlPageHashSha1].EditControl,
+                        lpszHash);
+
+                    supHeapFree(lpszHash);
+                }
+
             }
+
+            if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl)) {
+
+                lpszHash = ComputeHeaderPageHashForFile(&fvi, BCRYPT_SHA256_ALGORITHM);
+                if (lpszHash) {
+
+                    SetWindowText(g_UserHashControls[UserHashControlPageHashSha256].EditControl,
+                        lpszHash);
+
+                    supHeapFree(lpszHash);
+                }
+
+            }
+
+            HashUnloadFile(&fvi);
         }
+
     }
+    __finally {
 
-
-    //
-    // Page hashes (WDAC compliant, header only hash).
-    //
-    if (g_supportPH) {
-
-        if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl)) {
-
-            lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA1_ALGORITHM);
-            if (lpszHash) {
-
-                SetWindowText(g_UserHashControls[UserHashControlPageHashSha1].EditControl,
-                    lpszHash);
-
-                supHeapFree(lpszHash);
-            }
-
-        }
-
-        if (Button_GetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl)) {
-
-            lpszHash = ComputeHeaderPageHashForFile(lpFileName, BCRYPT_SHA256_ALGORITHM);
-            if (lpszHash) {
-
-                SetWindowText(g_UserHashControls[UserHashControlPageHashSha256].EditControl,
-                    lpszHash);
-
-                supHeapFree(lpszHash);
-            }
-
-        }
-
+        //
+        // Re-enable controls.
+        //
+        EnableWindow(GetDlgItem(hwndDlg, IDC_BROWSE), TRUE);
+        EnableWindow(GetDlgItem(hwndDlg, IDOK), TRUE);
     }
 }
 
@@ -481,9 +729,17 @@ VOID OnCalculateClick(
     }
 
     ResetUserHashControls();
-    ProcessFile(szFileName);
+    ProcessFile(hwndDlg, szFileName);
 }
 
+/*
+* OnDragAndDrop
+*
+* Purpose:
+*
+* WM_DROPFILES handler
+*
+*/
 VOID OnDragAndDrop(
     _In_ HWND hwndDlg,
     _In_ HDROP fDrop
@@ -508,20 +764,28 @@ VOID OnDragAndDrop(
                     MAX_PATH))
                 {
                     SetDlgItemText(hwndDlg, IDC_EDIT_FILE, szTargetName);
-                    ProcessFile(szTargetName);
+                    ProcessFile(hwndDlg, szTargetName);
                     goto DoFinish;
                 }
             }
         }
 
         SetDlgItemText(hwndDlg, IDC_EDIT_FILE, szFileName);
-        ProcessFile(szFileName);
+        ProcessFile(hwndDlg, szFileName);
     }
 
 DoFinish:
     DragFinish(fDrop);
 }
 
+/*
+* OnCopyHashText
+*
+* Purpose:
+*
+* WM_COMMAND -> IDC_BUTTON_COPY_* shared handler
+*
+*/
 VOID OnCopyHashText(
     _In_ UINT uidControl
 )
@@ -549,6 +813,14 @@ VOID OnCopyHashText(
     }
 }
 
+/*
+* OnInitDialog
+*
+* Purpose:
+*
+* WM_INITDIALOG handler
+*
+*/
 VOID OnInitDialog(
     _In_ HWND hwndDlg
 )
@@ -565,18 +837,8 @@ VOID OnInitDialog(
         g_UserHashControls[i].CheckBoxControl =
             GetDlgItem(hwndDlg, g_UserHashControls[i].CheckBoxControlId);
 
-        Button_SetCheck(g_UserHashControls[i].CheckBoxControl,
-            (i < UserHashControlPageHashSha1) ? TRUE : FALSE);
+        Button_SetCheck(g_UserHashControls[i].CheckBoxControl, TRUE);
     }
-
-    EnableWindow(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl, g_supportPH);
-    EnableWindow(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl, g_supportPH);
-    EnableWindow(g_UserHashControls[UserHashControlPageHashSha1].EditControl, g_supportPH);
-    EnableWindow(g_UserHashControls[UserHashControlPageHashSha256].EditControl, g_supportPH);
-    EnableWindow(GetDlgItem(hwndDlg, g_UserHashControls[UserHashControlPageHashSha1].CopyControlId), g_supportPH);
-    EnableWindow(GetDlgItem(hwndDlg, g_UserHashControls[UserHashControlPageHashSha256].CopyControlId), g_supportPH);
-    Button_SetCheck(g_UserHashControls[UserHashControlPageHashSha1].CheckBoxControl, g_supportPH);
-    Button_SetCheck(g_UserHashControls[UserHashControlPageHashSha256].CheckBoxControl, g_supportPH);
 
     HICON hIcon = (HICON)LoadImage(g_hInstance,
         MAKEINTRESOURCE(IDI_ICONMAIN),
@@ -591,6 +853,14 @@ VOID OnInitDialog(
 
 }
 
+/*
+* OnShowWindow
+*
+* Purpose:
+*
+* WM_SHOWWINDOW handler
+*
+*/
 VOID OnShowWindow(
     _In_ HWND hwndDlg
 )
@@ -735,26 +1005,40 @@ UINT ProcessFileCLI(
         BCRYPT_SHA512_ALGORITHM
     };
 
-    fprintf_s(lpOutStream, "File: %ws\n\nAuthenticode hashes:\n", lpFileName);
+    FILE_VIEW_INFO fvi;
 
-    for (UINT i = 0; i < ARRAYSIZE(cryptAlgoIdRef); i++) {
-        lpszHash = ComputeAuthenticodeHashForFile(lpFileName, cryptAlgoIdRef[i]);
-        if (lpszHash) {
-            fprintf_s(lpOutStream, "%ws:\t%ws\n", cryptAlgoIdRef[i], lpszHash);
-            supHeapFree(lpszHash);
-        }
-        else {
-            fprintf_s(lpOutStream, "Error: empty hash %ws value\n", cryptAlgoIdRef[i]);
-        }
-    }
+    RtlSecureZeroMemory(&fvi, sizeof(fvi));
 
-    if (g_supportPH) {
+    fvi.FileName = lpFileName;
+
+    if (HashLoadFile(&fvi, FALSE)) {
+
+        //
+        // Authenticode
+        //
+
+        fprintf_s(lpOutStream, "File: %ws\n\nAuthenticode hashes:\n", lpFileName);
+
+        for (UINT i = 0; i < ARRAYSIZE(cryptAlgoIdRef); i++) {
+            lpszHash = ComputeAuthenticodeHashForFile(&fvi, cryptAlgoIdRef[i]);
+            if (lpszHash) {
+                fprintf_s(lpOutStream, "%ws:\t%ws\n", cryptAlgoIdRef[i], lpszHash);
+                supHeapFree(lpszHash);
+            }
+            else {
+                fprintf_s(lpOutStream, "Error: empty hash %ws value\n", cryptAlgoIdRef[i]);
+            }
+        }
+
+        //
+        // Page hash
+        //
 
         fprintf_s(lpOutStream, "\nFirst page hash:\n");
 
         LPCWSTR lpAlgId = BCRYPT_SHA1_ALGORITHM;
 
-        lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
+        lpszHash = ComputeHeaderPageHashForFile(&fvi, lpAlgId);
         if (lpszHash) {
             fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
             supHeapFree(lpszHash);
@@ -765,7 +1049,7 @@ UINT ProcessFileCLI(
 
         lpAlgId = BCRYPT_SHA256_ALGORITHM;
 
-        lpszHash = ComputeHeaderPageHashForFile(lpFileName, lpAlgId);
+        lpszHash = ComputeHeaderPageHashForFile(&fvi, lpAlgId);
         if (lpszHash) {
             fprintf_s(lpOutStream, "%ws:\t%ws\n", lpAlgId, lpszHash);
             supHeapFree(lpszHash);
@@ -773,6 +1057,8 @@ UINT ProcessFileCLI(
         else {
             fprintf_s(lpOutStream, "Error: empty page hash %ws value\n", lpAlgId);
         }
+
+        HashUnloadFile(&fvi);
 
     }
 
@@ -855,26 +1141,8 @@ BOOLEAN InitializeGlobals(
 
     HeapSetInformation(g_Heap, HeapEnableTerminationOnCorruption, NULL, 0);
 
-    HMODULE hModule = GetModuleHandle(WINTRUST_DLL);
-    if (hModule == NULL) {
-
-        ULONG loadFlag = 0;
-
-        if (IsWindows8OrGreater()) {
-            loadFlag = LOAD_LIBRARY_SEARCH_SYSTEM32;
-        }
-
-        hModule = LoadLibraryEx(WINTRUST_DLL, NULL, loadFlag);
-    }
-
-    if (hModule == NULL)
-        return FALSE;
-
-    //
-    // Windows 7 miss this API.
-    //
-    ComputeFirstPageHash = (pfnComputeFirstPageHash)GetProcAddress(hModule, "ComputeFirstPageHash");
-    g_supportPH = (ComputeFirstPageHash != NULL);
+    RtlSecureZeroMemory(&g_SystemInfo, sizeof(g_SystemInfo));
+    GetSystemInfo(&g_SystemInfo);
 
     return TRUE;
 }
