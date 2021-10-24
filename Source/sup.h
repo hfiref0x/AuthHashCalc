@@ -18,6 +18,12 @@
 *******************************************************************************/
 #pragma once
 
+typedef struct _FILE_EXCLUDE_DATA {
+    ULONG ChecksumOffset;
+    ULONG SecurityOffset;
+    PIMAGE_DATA_DIRECTORY SecurityDirectory;
+} FILE_EXCLUDE_DATA, * PFILE_EXCLUDE_DATA;
+
 typedef struct _FILE_VIEW_INFO {
     LPCWSTR FileName;
     HANDLE FileHandle;
@@ -26,6 +32,7 @@ typedef struct _FILE_VIEW_INFO {
     SIZE_T ViewSize;
     LARGE_INTEGER FileSize;
     PIMAGE_NT_HEADERS NtHeaders;
+    FILE_EXCLUDE_DATA ExcludeData;
 } FILE_VIEW_INFO, * PFILE_VIEW_INFO;
 
 VOID supDestroyFileViewInfo(

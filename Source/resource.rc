@@ -51,8 +51,8 @@ END
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,1,3
- PRODUCTVERSION 1,0,1,3
+ FILEVERSION 1,0,1,4
+ PRODUCTVERSION 1,0,1,4
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -69,12 +69,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "UG North"
             VALUE "FileDescription", "Authenticode Hash Calculator for PE32/PE32+ files"
-            VALUE "FileVersion", "1.0.1.3"
+            VALUE "FileVersion", "1.0.1.4"
             VALUE "InternalName", "AuthHashCalc.exe"
             VALUE "LegalCopyright", "Copyright (C) 2021"
             VALUE "OriginalFilename", "AuthHashCalc.exe"
             VALUE "ProductName", "AuthHashCalc"
-            VALUE "ProductVersion", "1.0.1.3"
+            VALUE "ProductVersion", "1.0.1.4"
         END
     END
     BLOCK "VarFileInfo"
