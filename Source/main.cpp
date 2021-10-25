@@ -43,8 +43,8 @@ static DLG_HASH_CTRL g_UserHashControls[] = {
 
 #define PROGRAM_VERSION_MAJOR       1
 #define PROGRAM_VERSION_MINOR       0
-#define PROGRAM_VERSION_REVISION    1
-#define PROGRAM_VERSION_BUILD       4
+#define PROGRAM_VERSION_REVISION    2
+#define PROGRAM_VERSION_BUILD       2110
 
 static HANDLE g_Heap;
 static HINSTANCE g_hInstance;
@@ -1170,7 +1170,6 @@ int CALLBACK WinMain(
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
-
 
     if (!InitializeGlobals(hInstance)) {
         nRet = GetLastError();

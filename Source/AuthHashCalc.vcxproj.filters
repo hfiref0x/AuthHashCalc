@@ -42,9 +42,6 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="calculator_icon2473.png">
-      <Filter>Resource Files</Filter>
-    </Image>
     <Image Include="main.ico">
       <Filter>Resource Files</Filter>
     </Image>
