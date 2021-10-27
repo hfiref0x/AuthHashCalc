@@ -6,7 +6,7 @@
 *
 *  VERSION:     1.03
 *
-*  DATE:        21 Oct 2021
+*  DATE:        26 Oct 2021
 *
 *  Program global support routines.
 *
@@ -22,6 +22,15 @@
 #define RTL_MEG                   (1024UL * 1024UL)
 #define RTLP_IMAGE_MAX_DOS_HEADER (256UL * RTL_MEG)
 
+#define PE_SIGNATURE_SIZE 4
+//
+// Major copy-paste.
+//
+#define MM_SIZE_OF_LARGEST_IMAGE ((ULONG)0x77000000)
+#define MM_MAXIMUM_IMAGE_HEADER (2 * PAGE_SIZE)
+#define MM_MAXIMUM_IMAGE_SECTIONS                       \
+     ((MM_MAXIMUM_IMAGE_HEADER - (PAGE_SIZE + sizeof(IMAGE_NT_HEADERS))) /  \
+            sizeof(IMAGE_SECTION_HEADER))
 
 __inline WCHAR nibbletoh(BYTE c, BOOLEAN upcase)
 {
@@ -213,6 +222,7 @@ NTSTATUS supxInitializeFileViewInfo(
         ntStatus = STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
+    ViewInformation->LastError = IMAGE_VERIFY_OK;
     ViewInformation->FileHandle = fileHandle;
     ViewInformation->FileSize = fileSize;
     ViewInformation->SectionHandle = sectionHandle;
@@ -236,42 +246,37 @@ NTSTATUS supMapInputFileForRead(
     NTSTATUS ntStatus;
     SIZE_T viewSize;
 
-    do {
+    ntStatus = supxInitializeFileViewInfo(ViewInformation);
+    if (!NT_SUCCESS(ntStatus))
+        return ntStatus;
 
-        ntStatus = supxInitializeFileViewInfo(ViewInformation);
-        if (!NT_SUCCESS(ntStatus))
-            break;
+    if (PartialMap) {
 
-        if (PartialMap) {
-
-            if (ViewInformation->FileSize.QuadPart < RTL_MEG)
-                viewSize = (SIZE_T)ViewInformation->FileSize.QuadPart;
-            else
-                viewSize = (SIZE_T)RTL_MEG;
-
-        }
-        else {
-
+        if (ViewInformation->FileSize.QuadPart < RTL_MEG)
             viewSize = (SIZE_T)ViewInformation->FileSize.QuadPart;
+        else
+            viewSize = (SIZE_T)RTL_MEG;
 
-        }
+    }
+    else {
 
-        ntStatus = NtMapViewOfSection(ViewInformation->SectionHandle,
-            NtCurrentProcess(),
-            &ViewInformation->ViewBase,
-            0,
-            0,
-            NULL,
-            &viewSize,
-            ViewShare,
-            0,
-            PAGE_READONLY);
+        viewSize = (SIZE_T)ViewInformation->FileSize.QuadPart;
 
-        if (NT_SUCCESS(ntStatus))
-            ViewInformation->ViewSize = viewSize;
+    }
 
+    ntStatus = NtMapViewOfSection(ViewInformation->SectionHandle,
+        NtCurrentProcess(),
+        &ViewInformation->ViewBase,
+        0,
+        0,
+        NULL,
+        &viewSize,
+        ViewShare,
+        0,
+        PAGE_READONLY);
 
-    } while (FALSE);
+    if (NT_SUCCESS(ntStatus))
+        ViewInformation->ViewSize = viewSize;
 
     return ntStatus;
 }
@@ -365,59 +370,165 @@ BOOL supDragAndDropResolveTarget(
     return bResult;
 }
 
-//
-// Major copy-paste.
-//
-#define MM_SIZE_OF_LARGEST_IMAGE ((ULONG)0x77000000)
-#define MM_MAXIMUM_IMAGE_HEADER (2 * PAGE_SIZE)
-#define MM_MAXIMUM_IMAGE_SECTIONS                       \
-     ((MM_MAXIMUM_IMAGE_HEADER - (PAGE_SIZE + sizeof(IMAGE_NT_HEADERS))) /  \
-            sizeof(IMAGE_SECTION_HEADER))
+#pragma warning(push)
+#pragma warning(disable: 4319)
 
-#define VALIDATE_NTHEADER(Hdr) {                                    \
-    if (((((Hdr)->OptionalHeader).FileAlignment & 511) != 0) &&     \
-        (((Hdr)->OptionalHeader).FileAlignment !=                   \
-         ((Hdr)->OptionalHeader).SectionAlignment)) {               \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((Hdr)->OptionalHeader).FileAlignment == 0) {               \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((((Hdr)->OptionalHeader).SectionAlignment - 1) &           \
-          ((Hdr)->OptionalHeader).SectionAlignment) != 0) {         \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((((Hdr)->OptionalHeader).FileAlignment - 1) &              \
-          ((Hdr)->OptionalHeader).FileAlignment) != 0) {            \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((Hdr)->OptionalHeader).SectionAlignment < ((Hdr)->OptionalHeader).FileAlignment) { \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((Hdr)->OptionalHeader).SizeOfImage > MM_SIZE_OF_LARGEST_IMAGE) { \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if ((Hdr)->FileHeader.NumberOfSections > MM_MAXIMUM_IMAGE_SECTIONS) { \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((Hdr)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) && \
-        !((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_I386))  { \
-        return FALSE;                                               \
-    }                                                               \
-                                                                    \
-    if (((Hdr)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) && \
-        !(((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_IA64) || \
-          ((Hdr)->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64))) { \
-        return FALSE;                                               \
-    }                                                               \
+/*
+* supxValidateNtHeader
+*
+* Purpose:
+*
+* Common validation for file image header.
+*
+*/
+BOOLEAN supxValidateNtHeader(
+    _In_ PIMAGE_NT_HEADERS Header,
+    _Out_ PDWORD ErrorCode
+)
+{
+    INT i;
+    ULONG64 lastSectionVA;
+    PIMAGE_NT_HEADERS32 pHdr32;
+    PIMAGE_NT_HEADERS64 pHdr64;
+    PIMAGE_SECTION_HEADER pSection;
+
+    if (Header->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+
+        pHdr64 = PIMAGE_NT_HEADERS64(Header);
+
+        if (((pHdr64->OptionalHeader.FileAlignment & 511) != 0) &&
+            (pHdr64->OptionalHeader.FileAlignment != pHdr64->OptionalHeader.SectionAlignment))
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr64->OptionalHeader.FileAlignment == 0) {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (((pHdr64->OptionalHeader.SectionAlignment - 1) &
+            pHdr64->OptionalHeader.SectionAlignment) != 0)
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (((pHdr64->OptionalHeader.FileAlignment - 1) &
+            pHdr64->OptionalHeader.FileAlignment) != 0)
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr64->OptionalHeader.SectionAlignment < pHdr64->OptionalHeader.FileAlignment) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr64->OptionalHeader.SizeOfImage > MM_SIZE_OF_LARGEST_IMAGE) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SIZEOFIMAGE;
+            return FALSE;
+        }
+
+        if (pHdr64->FileHeader.NumberOfSections > MM_MAXIMUM_IMAGE_SECTIONS) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_COUNT;
+            return FALSE;
+        }
+
+        if (pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_IA64 &&
+            pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
+            return FALSE;
+        }
+
+    }
+    else if (Header->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+
+        pHdr32 = PIMAGE_NT_HEADERS32(Header);
+
+        if (((pHdr32->OptionalHeader.FileAlignment & 511) != 0) &&
+            (pHdr32->OptionalHeader.FileAlignment != pHdr32->OptionalHeader.SectionAlignment))
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr32->OptionalHeader.FileAlignment == 0) {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (((pHdr32->OptionalHeader.SectionAlignment - 1) &
+            pHdr32->OptionalHeader.SectionAlignment) != 0)
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (((pHdr32->OptionalHeader.FileAlignment - 1) &
+            pHdr32->OptionalHeader.FileAlignment) != 0)
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr32->OptionalHeader.SectionAlignment < pHdr32->OptionalHeader.FileAlignment) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_ALIGNMENT;
+            return FALSE;
+        }
+
+        if (pHdr32->OptionalHeader.SizeOfImage > MM_SIZE_OF_LARGEST_IMAGE) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SIZEOFIMAGE;
+            return FALSE;
+        }
+
+        if (pHdr32->FileHeader.NumberOfSections > MM_MAXIMUM_IMAGE_SECTIONS) {
+            *ErrorCode = IMAGE_VERIFY_BAD_SECTION_COUNT;
+            return FALSE;
+        }
+
+        if ((pHdr32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) &&
+            !(pHdr32->FileHeader.Machine == IMAGE_FILE_MACHINE_I386))
+        {
+            *ErrorCode = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
+            return FALSE;
+        }
+
+    }
+    else {
+        *ErrorCode = IMAGE_VERIFY_BAD_OPTIONAL_HEADER_MAGIC;
+        return FALSE;
+    }
+
+    pSection = IMAGE_FIRST_SECTION(Header);
+
+    lastSectionVA = (ULONG64)pSection->VirtualAddress;
+
+    for (i = 0; i < Header->FileHeader.NumberOfSections; i++, pSection++) {
+
+        if (pSection->VirtualAddress != lastSectionVA) {
+            *ErrorCode = IMAGE_VERIFY_BAD_NTHEADERS;
+            return FALSE;
+        }
+
+        lastSectionVA += ALIGN_UP_BY(pSection->Misc.VirtualSize,
+            Header->OptionalHeader.SectionAlignment);
+
+    }
+
+    if (lastSectionVA != Header->OptionalHeader.SizeOfImage) {
+        *ErrorCode = IMAGE_VERIFY_BAD_NTHEADERS;
+        return FALSE;
+    }
+
+    *ErrorCode = IMAGE_VERIFY_OK;
+    return TRUE;
 }
+
+#pragma warning(pop)
 
 /*
 * supIsValidImage
@@ -428,25 +539,28 @@ BOOL supDragAndDropResolveTarget(
 *
 */
 BOOLEAN supIsValidImage(
-    _In_ PVOID ImageBase,
-    _In_ LARGE_INTEGER EndOfFile
+    _In_ PFILE_VIEW_INFO ViewInformation
 )
 {
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)ImageBase;
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)ViewInformation->ViewBase;
     PIMAGE_NT_HEADERS ntHeaders = NULL;
 
-    SetLastError(ERROR_BAD_EXE_FORMAT);
+    ViewInformation->LastError = IMAGE_VERIFY_UNKNOWN_ERROR;
 
     __try {
 
         if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_DOSMAGIC;
             return FALSE;
         }
 
         if (dosHeader->e_lfanew == 0 ||
-            (ULONG)dosHeader->e_lfanew > EndOfFile.LowPart ||
+            (ULONG)dosHeader->e_lfanew > ViewInformation->FileSize.LowPart ||
+            (((ULONG)dosHeader->e_lfanew + PE_SIGNATURE_SIZE +
+                (ULONG)sizeof(IMAGE_FILE_HEADER)) >= ViewInformation->FileSize.LowPart) ||
             dosHeader->e_lfanew >= RTLP_IMAGE_MAX_DOS_HEADER)
         {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_NEWEXE;
             return FALSE;
         }
 
@@ -454,43 +568,47 @@ BOOLEAN supIsValidImage(
             sizeof(IMAGE_NT_HEADERS) +
             (16 * sizeof(IMAGE_SECTION_HEADER))) <= (ULONG)dosHeader->e_lfanew)
         {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_NEWEXE;
             return FALSE;
         }
 
-        ntHeaders = (PIMAGE_NT_HEADERS)((PCHAR)ImageBase + dosHeader->e_lfanew);
+        ntHeaders = (PIMAGE_NT_HEADERS)((PCHAR)ViewInformation->ViewBase + (ULONG)dosHeader->e_lfanew);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_NTSIGNATURE;
+            return FALSE;
+        }
 
-        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE ||
-            ntHeaders->FileHeader.SizeOfOptionalHeader == 0 ||
+        if ((ULONG)dosHeader->e_lfanew >= ntHeaders->OptionalHeader.SizeOfImage) {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_NEWEXE;
+            return FALSE;
+        }
+
+        if (ntHeaders->FileHeader.SizeOfOptionalHeader == 0 ||
             ntHeaders->FileHeader.SizeOfOptionalHeader & (sizeof(ULONG_PTR) - 1))
         {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_OPTIONAL_HEADER;
             return FALSE;
         }
 
         if (!(ntHeaders->FileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE)) {
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_FILE_HEADER_CHARACTERISTICS;
             return FALSE;
         }
 
         if (ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 &&
             ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_I386)
         {
-            SetLastError(ERROR_IMAGE_MACHINE_TYPE_MISMATCH);
+            ViewInformation->LastError = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
             return FALSE;
         }
 
-        if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
-            VALIDATE_NTHEADER((PIMAGE_NT_HEADERS32)ntHeaders);
-        }
-        else if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-            VALIDATE_NTHEADER((PIMAGE_NT_HEADERS64)ntHeaders);
-        }
-        else
-            return FALSE;
+        return supxValidateNtHeader(ntHeaders, &ViewInformation->LastError);
 
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
+        ViewInformation->LastError = IMAGE_VERIFY_EXCEPTION_IN_PROCESS;
         return FALSE;
     }
-    return TRUE;
 }
 
 /*
@@ -520,4 +638,53 @@ wchar_t* supGetFileExt(
         p = (wchar_t*)f;
 
     return p;
+}
+
+LPCWSTR supImageVerifyErrorToString(
+    _In_ DWORD LastError
+)
+{
+    switch (LastError) {
+    case IMAGE_VERIFY_OK:
+        return TEXT("OK");
+    case IMAGE_VERIFY_BAD_NTSIGNATURE:
+        return TEXT("Bad NT signature value");
+    case IMAGE_VERIFY_BAD_OPTIONAL_HEADER:
+        return TEXT("Bad optional header");
+    case IMAGE_VERIFY_BAD_OPTIONAL_HEADER_MAGIC:
+        return TEXT("Bad optional header magic value");
+    case IMAGE_VERIFY_BAD_FILE_HEADER_MAGIC:
+        return TEXT("Bad file header magic value");
+    case IMAGE_VERIFY_BAD_FILE_HEADER_CHARACTERISTICS:
+        return TEXT("Bad file header characteristics value");
+    case IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE:
+        return TEXT("Bad file header machine value");
+    case IMAGE_VERIFY_BAD_NTHEADERS:
+        return TEXT("Bad NtHeaders");
+    case IMAGE_VERIFY_BAD_FILE_ALIGNMENT:
+        return TEXT("Bad file alignment");
+    case IMAGE_VERIFY_BAD_SECTION_ALIGNMENT:
+        return TEXT("Bad section alignment");
+    case IMAGE_VERIFY_BAD_SIZEOFHEADERS:
+        return TEXT("Bad SizeOfHeaders");
+    case IMAGE_VERIFY_BAD_SIZEOFIMAGE:
+        return TEXT("Bad SizeOfImage");
+    case IMAGE_VERIFY_BAD_NEWEXE:
+        return TEXT("Bad NewExe value");
+    case IMAGE_VERIFY_BAD_DOSMAGIC:
+        return TEXT("Bad DOS magic value");
+    case IMAGE_VERIFY_EXCEPTION_IN_PROCESS:
+        return TEXT("Exception while processing input file");
+    case IMAGE_VERIFY_BAD_SECTION_COUNT:
+        return TEXT("Bad number of sections in file");
+    case IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_VA:
+        return TEXT("Invalid security directory virtual address");
+    case IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_SIZE:
+        return TEXT("Invalid security directory size");
+    case IMAGE_VERIFY_OOB_READ:
+        return TEXT("Out of bounds read");
+
+    default:
+        return TEXT("Unknown Error");
+    }
 }

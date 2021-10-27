@@ -6,7 +6,7 @@
 *
 *  VERSION:     1.03
 *
-*  DATE:        21 Oct 2021
+*  DATE:        26 Oct 2021
 *
 *  Common include header file.
 *
@@ -36,8 +36,10 @@
 #include <VersionHelpers.h>
 #include <ntstatus.h>
 #include "ntos.h"
-#include "sup.h"
 #include "resource.h"
+
+#pragma comment(lib, "Bcrypt.lib")
+#pragma comment(lib, "Comctl32.lib")
 
 typedef struct _CNG_CTX {
     PVOID Hash;
@@ -46,7 +48,26 @@ typedef struct _CNG_CTX {
     ULONG HashObjectSize;
     BCRYPT_ALG_HANDLE AlgHandle;
     BCRYPT_HASH_HANDLE HashHandle;
+    HANDLE HeapHandle;
 } CNG_CTX, * PCNG_CTX;
 
-#pragma comment(lib, "Bcrypt.lib")
-#pragma comment(lib, "Comctl32.lib")
+typedef struct _FILE_EXCLUDE_DATA {
+    ULONG ChecksumOffset;
+    ULONG SecurityOffset;
+    PIMAGE_DATA_DIRECTORY SecurityDirectory;
+} FILE_EXCLUDE_DATA, * PFILE_EXCLUDE_DATA;
+
+typedef struct _FILE_VIEW_INFO {
+    DWORD LastError;
+    LPCWSTR FileName;
+    HANDLE FileHandle;
+    HANDLE SectionHandle;
+    PVOID ViewBase;
+    SIZE_T ViewSize;
+    LARGE_INTEGER FileSize;
+    PIMAGE_NT_HEADERS NtHeaders;
+    FILE_EXCLUDE_DATA ExcludeData;
+} FILE_VIEW_INFO, * PFILE_VIEW_INFO;
+
+#include "sup.h"
+#include "hash.h"

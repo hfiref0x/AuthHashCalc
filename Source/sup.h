@@ -6,7 +6,7 @@
 *
 *  VERSION:     1.03
 *
-*  DATE:        21 Oct 2021
+*  DATE:        26 Oct 2021
 *
 *  Support routines header file.
 *
@@ -18,22 +18,27 @@
 *******************************************************************************/
 #pragma once
 
-typedef struct _FILE_EXCLUDE_DATA {
-    ULONG ChecksumOffset;
-    ULONG SecurityOffset;
-    PIMAGE_DATA_DIRECTORY SecurityDirectory;
-} FILE_EXCLUDE_DATA, * PFILE_EXCLUDE_DATA;
+#define IMAGE_VERIFY_OK                                 0
+#define IMAGE_VERIFY_BAD_NTSIGNATURE                    1
+#define IMAGE_VERIFY_BAD_OPTIONAL_HEADER                2
+#define IMAGE_VERIFY_BAD_OPTIONAL_HEADER_MAGIC          3
+#define IMAGE_VERIFY_BAD_FILE_HEADER_MAGIC              4
+#define IMAGE_VERIFY_BAD_FILE_HEADER_CHARACTERISTICS    5
+#define IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE            6
+#define IMAGE_VERIFY_BAD_NTHEADERS                      7
+#define IMAGE_VERIFY_BAD_FILE_ALIGNMENT                 8
+#define IMAGE_VERIFY_BAD_SECTION_ALIGNMENT              9
+#define IMAGE_VERIFY_BAD_SIZEOFHEADERS                  10
+#define IMAGE_VERIFY_BAD_SIZEOFIMAGE                    11
+#define IMAGE_VERIFY_BAD_NEWEXE                         12
+#define IMAGE_VERIFY_BAD_DOSMAGIC                       13
+#define IMAGE_VERIFY_EXCEPTION_IN_PROCESS               14
+#define IMAGE_VERIFY_BAD_SECTION_COUNT                  15
+#define IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_VA          16
+#define IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_SIZE        17
+#define IMAGE_VERIFY_OOB_READ                           18
 
-typedef struct _FILE_VIEW_INFO {
-    LPCWSTR FileName;
-    HANDLE FileHandle;
-    HANDLE SectionHandle;
-    PVOID ViewBase;
-    SIZE_T ViewSize;
-    LARGE_INTEGER FileSize;
-    PIMAGE_NT_HEADERS NtHeaders;
-    FILE_EXCLUDE_DATA ExcludeData;
-} FILE_VIEW_INFO, * PFILE_VIEW_INFO;
+#define IMAGE_VERIFY_UNKNOWN_ERROR                      0xff
 
 VOID supDestroyFileViewInfo(
     _In_ PFILE_VIEW_INFO ViewInformation);
@@ -64,8 +69,7 @@ BOOL supDragAndDropResolveTarget(
     _In_ SIZE_T cchLinkTarget);
 
 BOOLEAN supIsValidImage(
-    _In_ PVOID ImageBase,
-    _In_ LARGE_INTEGER EndOfFile);
+    _In_ PFILE_VIEW_INFO ViewInformation);
 
 LPWSTR supPrintHash(
     _In_reads_bytes_(Length) LPBYTE Buffer,
@@ -74,3 +78,6 @@ LPWSTR supPrintHash(
 
 wchar_t* supGetFileExt(
     _In_ const wchar_t* f);
+
+LPCWSTR supImageVerifyErrorToString(
+    _In_ DWORD LastError);

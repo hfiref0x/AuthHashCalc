@@ -21,6 +21,9 @@
     <ClCompile Include="sup.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="hash.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="global.h">
@@ -33,6 +36,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ntos.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hash.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
