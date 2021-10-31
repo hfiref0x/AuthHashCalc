@@ -36,7 +36,6 @@
 #define IMAGE_VERIFY_BAD_SECTION_COUNT                  15
 #define IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_VA          16
 #define IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_SIZE        17
-#define IMAGE_VERIFY_OOB_READ                           18
 
 #define IMAGE_VERIFY_UNKNOWN_ERROR                      0xff
 

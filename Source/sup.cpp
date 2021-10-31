@@ -330,7 +330,7 @@ BOOL supDragAndDropResolveTarget(
     IPersistFile* ppf = NULL;
     WCHAR szGotPath[MAX_PATH + 1];
 
-    if (FAILED(CoInitialize(NULL)))
+    if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
         return FALSE;
 
     do {
@@ -681,8 +681,6 @@ LPCWSTR supImageVerifyErrorToString(
         return TEXT("Invalid security directory virtual address");
     case IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_SIZE:
         return TEXT("Invalid security directory size");
-    case IMAGE_VERIFY_OOB_READ:
-        return TEXT("Out of bounds read");
 
     default:
         return TEXT("Unknown Error");
