@@ -490,8 +490,7 @@ BOOLEAN supxValidateNtHeader(
             return FALSE;
         }
 
-        if ((pHdr32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) &&
-            !(pHdr32->FileHeader.Machine == IMAGE_FILE_MACHINE_I386))
+        if (pHdr32->FileHeader.Machine != IMAGE_FILE_MACHINE_I386)
         {
             *ErrorCode = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
             return FALSE;
