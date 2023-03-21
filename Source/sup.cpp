@@ -438,7 +438,8 @@ BOOLEAN supxValidateNtHeader(
         }
 
         if (pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_IA64 &&
-            pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+            pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 &&
+            pHdr64->FileHeader.Machine != IMAGE_FILE_MACHINE_ARM64)
         {
             *ErrorCode = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
             return FALSE;
@@ -490,8 +491,8 @@ BOOLEAN supxValidateNtHeader(
             return FALSE;
         }
 
-        if ((pHdr32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) &&
-            !(pHdr32->FileHeader.Machine == IMAGE_FILE_MACHINE_I386))
+        if (pHdr32->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 &&
+            pHdr32->FileHeader.Machine != IMAGE_FILE_MACHINE_ARMNT)
         {
             *ErrorCode = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
             return FALSE;
@@ -596,7 +597,10 @@ BOOLEAN supIsValidImage(
         }
 
         if (ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 &&
-            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_I386)
+            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_ARM64 &&
+            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_IA64 &&
+            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 &&
+            ntHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_ARMNT)
         {
             ViewInformation->LastError = IMAGE_VERIFY_BAD_FILE_HEADER_MACHINE;
             return FALSE;
