@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2021
+*  (C) COPYRIGHT AUTHORS, 2021 - 2024
 *
 *  TITLE:       HASH.CPP
 *
-*  VERSION:     1.03
+*  VERSION:     1.04
 *
-*  DATE:        26 Oct 2021
+*  DATE:        22 Feb 2024
 *
 *  Hash support routines.
 *
@@ -19,35 +19,42 @@
 
 #include "global.h"
 
+#define DEFAULT_ALIGN_BYTES 8
+
 /*
-* HashpAddPaddingForPage
+* HashpAddPad
 *
 * Purpose:
 *
-* Calculate hash for page padding
+* Calculate hash for pad bytes
 *
 */
-NTSTATUS HashpAddPaddingForPage(
-    _In_ ULONG Offset,
-    _In_ ULONG PageSize,
-    _In_ PCNG_CTX HashContext
-)
+NTSTATUS HashpAddPad(
+    _In_ ULONG PaddingSize,
+    _In_ PCNG_CTX HashContext)
 {
     NTSTATUS ntStatus = STATUS_SUCCESS;
-    PVOID pvPadding;
-    ULONG cbInput;
+    ULONG cbPad = PaddingSize, i;
+    UCHAR pbInput[DEFAULT_ALIGN_BYTES] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-    if (Offset < PageSize) {
+    if (cbPad >= DEFAULT_ALIGN_BYTES) {
 
-        cbInput = PageSize - Offset;
-        pvPadding = (PVOID)supHeapAlloc(PageSize);
-        if (pvPadding) {
+        i = (cbPad >> 3);
+        do {
 
             ntStatus = BCryptHashData(HashContext->HashHandle,
-                (PUCHAR)pvPadding, cbInput, 0);
+                (PUCHAR)pbInput, DEFAULT_ALIGN_BYTES, 0);
 
-            supHeapFree(pvPadding);
-        }
+            cbPad -= DEFAULT_ALIGN_BYTES;
+            --i;
+
+        } while (i);
+
+    }
+
+    if (cbPad) {
+        ntStatus = BCryptHashData(HashContext->HashHandle,
+            (PUCHAR)pbInput, cbPad, 0);
     }
 
     return ntStatus;
@@ -379,12 +386,11 @@ BOOLEAN CalculateFirstPageHash(
             offset += 1;
         }
 
-        ntStatus = HashpAddPaddingForPage(offset,
-            PageSize,
-            HashContext);
-
-        if (!NT_SUCCESS(ntStatus))
-            return FALSE;
+        if (offset < PageSize) {
+            ntStatus = HashpAddPad(PageSize - offset, HashContext);
+            if (!NT_SUCCESS(ntStatus))
+                return FALSE;
+        }
 
         ntStatus = BCryptFinishHash(HashContext->HashHandle,
             (PUCHAR)HashContext->Hash,
@@ -414,7 +420,7 @@ BOOLEAN CalculateAuthenticodeHash(
 )
 {
     NTSTATUS ntStatus = STATUS_INVALID_IMAGE_FORMAT;
-    ULONG securityOffset, checksumOffset, cbInput;
+    ULONG securityOffset, checksumOffset, cbInput, sz, cbPad;
     ULONG fileOffset = 0;
     PVOID imageBase;
     PIMAGE_DATA_DIRECTORY dataDirectory;
@@ -463,6 +469,15 @@ BOOLEAN CalculateAuthenticodeHash(
                     (PUCHAR)RtlOffsetToPointer(imageBase, fileOffset), cbInput, 0);
 
                 if (NT_SUCCESS(ntStatus)) {
+
+                    sz = (cbInput % DEFAULT_ALIGN_BYTES);
+                    if (sz) {
+
+                        cbPad = (DEFAULT_ALIGN_BYTES - sz);
+                        ntStatus = HashpAddPad(cbPad, HashContext);
+                        if (!NT_SUCCESS(ntStatus))
+                            return FALSE;
+                    }
 
                     ntStatus = BCryptFinishHash(HashContext->HashHandle,
                         (PUCHAR)HashContext->Hash,
