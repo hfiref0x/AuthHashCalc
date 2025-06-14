@@ -4,9 +4,9 @@
 *
 *  TITLE:       MAIN.CPP
 *
-*  VERSION:     1.04
+*  VERSION:     1.05
 *
-*  DATE:        22 Feb 2024
+*  DATE:        12 Jun 2025
 *
 *  AuthHashCalc main logic and entrypoint.
 *
@@ -43,8 +43,8 @@ static DLG_HASH_CTRL g_UserHashControls[] = {
 
 #define PROGRAM_VERSION_MAJOR       1
 #define PROGRAM_VERSION_MINOR       0
-#define PROGRAM_VERSION_REVISION    4
-#define PROGRAM_VERSION_BUILD       2402
+#define PROGRAM_VERSION_REVISION    5
+#define PROGRAM_VERSION_BUILD       2506
 
 static HANDLE g_Heap;
 static HINSTANCE g_hInstance;

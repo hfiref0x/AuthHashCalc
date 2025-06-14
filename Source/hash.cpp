@@ -1,12 +1,12 @@
 /*******************************************************************************
 *
-*  (C) COPYRIGHT AUTHORS, 2021 - 2024
+*  (C) COPYRIGHT AUTHORS, 2021 - 2025
 *
 *  TITLE:       HASH.CPP
 *
-*  VERSION:     1.04
+*  VERSION:     1.05
 *
-*  DATE:        22 Feb 2024
+*  DATE:        12 Jun 2025
 *
 *  Hash support routines.
 *
@@ -33,28 +33,23 @@ NTSTATUS HashpAddPad(
     _In_ ULONG PaddingSize,
     _In_ PCNG_CTX HashContext)
 {
+    if (PaddingSize == 0)
+        return STATUS_SUCCESS;
+
+    static const UCHAR zeroPad[DEFAULT_ALIGN_BYTES] = { 0 };
     NTSTATUS ntStatus = STATUS_SUCCESS;
-    ULONG cbPad = PaddingSize, i;
-    UCHAR pbInput[DEFAULT_ALIGN_BYTES] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    ULONG remainingPad = PaddingSize;
+    ULONG blockSize;
 
-    if (cbPad >= DEFAULT_ALIGN_BYTES) {
-
-        i = (cbPad >> 3);
-        do {
-
-            ntStatus = BCryptHashData(HashContext->HashHandle,
-                (PUCHAR)pbInput, DEFAULT_ALIGN_BYTES, 0);
-
-            cbPad -= DEFAULT_ALIGN_BYTES;
-            --i;
-
-        } while (i);
-
-    }
-
-    if (cbPad) {
+    while (remainingPad > 0) {
+        blockSize = min(remainingPad, DEFAULT_ALIGN_BYTES);
         ntStatus = BCryptHashData(HashContext->HashHandle,
-            (PUCHAR)pbInput, cbPad, 0);
+            (PUCHAR)zeroPad, blockSize, 0);
+
+        if (!NT_SUCCESS(ntStatus))
+            break;
+
+        remainingPad -= blockSize;
     }
 
     return ntStatus;
@@ -72,19 +67,14 @@ DWORD HashpGetSizeOfHeaders(
     _In_ PIMAGE_NT_HEADERS NtHeaders
 )
 {
-    PIMAGE_OPTIONAL_HEADER64 opt64;
-    PIMAGE_OPTIONAL_HEADER32 opt32;
-
     switch (NtHeaders->OptionalHeader.Magic) {
     case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
-        opt64 = (PIMAGE_OPTIONAL_HEADER64)&NtHeaders->OptionalHeader;
-        return opt64->SizeOfHeaders;
+        return ((PIMAGE_OPTIONAL_HEADER64)&NtHeaders->OptionalHeader)->SizeOfHeaders;
     case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
-        opt32 = (PIMAGE_OPTIONAL_HEADER32)&NtHeaders->OptionalHeader;
-        return opt32->SizeOfHeaders;
+        return ((PIMAGE_OPTIONAL_HEADER32)&NtHeaders->OptionalHeader)->SizeOfHeaders;
+    default:
+        return 0;
     }
-
-    return 0;
 }
 
 /*
@@ -99,7 +89,7 @@ BOOLEAN HashpGetExcludeRange(
     _In_ PFILE_VIEW_INFO ViewInformation
 )
 {
-    ULONG securityOffset = 0, checksumOffset = 0, c, numberOfSections;
+    ULONG securityOffset = 0, checksumOffset = 0, endOfLastSection, numberOfSections;
     PIMAGE_DATA_DIRECTORY dataDirectory = NULL;
 
     PIMAGE_SECTION_HEADER sectionTableEntry;
@@ -147,11 +137,10 @@ BOOLEAN HashpGetExcludeRange(
         }
 
         sectionTableEntry = IMAGE_FIRST_SECTION(ViewInformation->NtHeaders);
-
-        c = sectionTableEntry[numberOfSections - 1].PointerToRawData +
+        endOfLastSection = sectionTableEntry[numberOfSections - 1].PointerToRawData +
             sectionTableEntry[numberOfSections - 1].SizeOfRawData;
 
-        if (dataDirectory->VirtualAddress < c) {
+        if (dataDirectory->VirtualAddress < endOfLastSection) {
             ViewInformation->LastError = IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_VA;
             return FALSE;
         }
@@ -161,8 +150,7 @@ BOOLEAN HashpGetExcludeRange(
             return FALSE;
         }
 
-        c = ViewInformation->FileSize.LowPart - dataDirectory->VirtualAddress;
-        if (dataDirectory->Size > c) {
+        if (dataDirectory->Size > (ViewInformation->FileSize.LowPart - dataDirectory->VirtualAddress)) {
             ViewInformation->LastError = IMAGE_VERIFY_BAD_SECURITY_DIRECTORY_SIZE;
             return FALSE;
         }
@@ -193,26 +181,19 @@ NTSTATUS HashLoadFile(
 
     ntStatus = supMapInputFileForRead(ViewInformation, PartialMap);
     if (NT_SUCCESS(ntStatus)) {
-
         ntStatus = STATUS_INVALID_IMAGE_FORMAT;
-
         if (supIsValidImage(ViewInformation)) {
-
             ViewInformation->NtHeaders = RtlImageNtHeader(ViewInformation->ViewBase);
             if (ViewInformation->NtHeaders) {
-
                 if (HashpGetExcludeRange(ViewInformation)) {
                     return STATUS_SUCCESS;
                 }
-
             }
             else {
                 ViewInformation->LastError = IMAGE_VERIFY_BAD_NTHEADERS;
             }
         }
-
     }
-
     supDestroyFileViewInfo(ViewInformation);
     return ntStatus;
 }
@@ -313,6 +294,7 @@ NTSTATUS CreateHashContext(
 
     if (context->Hash) HeapFree(HeapHandle, 0, context->Hash);
     if (context->HashObject) HeapFree(HeapHandle, 0, context->HashObject);
+    if (context->AlgHandle) BCryptCloseAlgorithmProvider(context->AlgHandle, 0);
     HeapFree(HeapHandle, 0, context);
 
     return ntStatus;
@@ -330,12 +312,17 @@ VOID DestroyHashContext(
     _In_ PCNG_CTX Context
 )
 {
-    HANDLE heapHandle = Context->HeapHandle;
+    HANDLE heapHandle;
 
-    BCryptCloseAlgorithmProvider(Context->AlgHandle, 0);
+    if (!Context)
+        return;
+
+    heapHandle = Context->HeapHandle;
 
     if (Context->HashHandle)
         BCryptDestroyHash(Context->HashHandle);
+    if (Context->AlgHandle)
+        BCryptCloseAlgorithmProvider(Context->AlgHandle, 0);
     if (Context->Hash)
         HeapFree(heapHandle, 0, Context->Hash);
     if (Context->HashObject)
@@ -420,61 +407,54 @@ BOOLEAN CalculateAuthenticodeHash(
 )
 {
     NTSTATUS ntStatus = STATUS_INVALID_IMAGE_FORMAT;
-    ULONG securityOffset, checksumOffset, cbInput, sz, cbPad;
-    ULONG fileOffset = 0;
+    ULONG securityOffset, checksumOffset, paddingSize;
+    ULONG fileOffset = 0, dataSize;
     PVOID imageBase;
     PIMAGE_DATA_DIRECTORY dataDirectory;
 
     __try {
-
         imageBase = ViewInformation->ViewBase;
         checksumOffset = ViewInformation->ExcludeData.ChecksumOffset;
         securityOffset = ViewInformation->ExcludeData.SecurityOffset;
         dataDirectory = ViewInformation->ExcludeData.SecurityDirectory;
 
-        //
-        // Handle checksum offset.
-        //
-        cbInput = checksumOffset;
-
+        // 1. Start of file to checksum
         ntStatus = BCryptHashData(HashContext->HashHandle,
-            (PUCHAR)imageBase, cbInput, 0);
+            (PUCHAR)imageBase, checksumOffset, 0);
 
         if (NT_SUCCESS(ntStatus)) {
 
-            //
-            // Handle security offset.
-            //
+            // Skip checksum
             fileOffset = checksumOffset + RTL_FIELD_SIZE(IMAGE_OPTIONAL_HEADER, CheckSum);
 
-            cbInput = securityOffset - fileOffset;
-
+            // 2. After checksum to security directory
+            dataSize = securityOffset - fileOffset;
             ntStatus = BCryptHashData(HashContext->HashHandle,
-                (PUCHAR)RtlOffsetToPointer(imageBase, fileOffset), cbInput, 0);
+                (PUCHAR)RtlOffsetToPointer(imageBase, fileOffset), dataSize, 0);
 
             if (NT_SUCCESS(ntStatus)) {
 
+                // Skip security directory
                 fileOffset = securityOffset + sizeof(IMAGE_DATA_DIRECTORY);
 
-                if (dataDirectory->VirtualAddress == 0)
-                {
-                    cbInput = ViewInformation->FileSize.LowPart - fileOffset;
+                // 3. After security directory to end or certificate table
+                if (dataDirectory->VirtualAddress == 0) {
+                    dataSize = ViewInformation->FileSize.LowPart - fileOffset;
                 }
-                else
-                {
-                    cbInput = dataDirectory->VirtualAddress - fileOffset;
+                else {
+                    dataSize = dataDirectory->VirtualAddress - fileOffset;
                 }
 
                 ntStatus = BCryptHashData(HashContext->HashHandle,
-                    (PUCHAR)RtlOffsetToPointer(imageBase, fileOffset), cbInput, 0);
+                    (PUCHAR)RtlOffsetToPointer(imageBase, fileOffset), dataSize, 0);
 
                 if (NT_SUCCESS(ntStatus)) {
 
-                    sz = (cbInput % DEFAULT_ALIGN_BYTES);
-                    if (sz) {
-
-                        cbPad = (DEFAULT_ALIGN_BYTES - sz);
-                        ntStatus = HashpAddPad(cbPad, HashContext);
+                    // 4. Add padding if needed
+                    paddingSize = (dataSize % DEFAULT_ALIGN_BYTES);
+                    if (paddingSize) {
+                        paddingSize = (DEFAULT_ALIGN_BYTES - paddingSize);
+                        ntStatus = HashpAddPad(paddingSize, HashContext);
                         if (!NT_SUCCESS(ntStatus))
                             return FALSE;
                     }
