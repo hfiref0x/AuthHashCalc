@@ -1,5 +1,6 @@
-
+[![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2Fhfiref0x%2FAuthHashCalc&countColor=%23263759&style=flat)](https://visitorbadge.io/status?path=https%3A%2F%2Fgithub.com%2Fhfiref0x%2FAuthHashCalc)
 # AuthHashCalc
+
 ## Authenticode Hash Calculator for PE32/PE32+ files
 
 <img src="https://raw.githubusercontent.com/hfiref0x/AuthHashCalc/master/Screenshots/mainwnd.png" width="600" />
@@ -11,20 +12,20 @@
 * Administrative privileges are not required
 
 # Features
-* Portable Executable (PE32/PE32+) authenticode hash calculation (MD5/SHA1/SHA256/SHA384/SHA512);
-* WDAC compliant page hash calculation (image header only hash), SHA1/SHA256;
-* GUI and CLI version combined in single executable;
-* Drag and drop support for GUI version.
+* Portable Executable (PE32/PE32+) Authenticode hash calculation (MD5/SHA1/SHA256/SHA384/SHA512)
+* WDAC-compliant page hash calculation (image header only hash), SHA1/SHA256
+* GUI and CLI versions combined in a single executable
+* Drag and drop support for GUI version
 
 # Usage
-* Open desired file using button [...], select hash types you want to calculate and press "Calculate" button. Or drop your file using drag and drop operation.
-* CLI usage -> run program from console supplying parameter as input filename which authenticode hashes you want to calculate, **e.g. ahc64.exe c:\dir\mydriver.sys**. 
-If you want save result to the file then use third parameter as output filename, e.g. **ahc64.exe c:\dir\mydriver.sys c:\dir\result.txt**.
+* Open the desired file using the button [...], select hash types you want to calculate, and press the "Calculate" button. Or drop your file using drag and drop.
+* CLI usage: run the program from the console, supplying as a parameter the input filename for which you want to calculate Authenticode hashes, e.g., **ahc64.exe c:\dir\mydriver.sys**.
+* If you want to save the result to a file, use a third parameter as the output filename, e.g., **ahc64.exe c:\dir\mydriver.sys c:\dir\result.txt**.
 
 # Build
 
 AuthHashCalc comes with full source code written in C.
-In order to build from source you need Microsoft Visual Studio 2015 and later versions.
+To build from source you need Microsoft Visual Studio 2015 or later.
 
 # Links
 * https://docs.microsoft.com/en-us/windows-hardware/drivers/install/authenticode
