@@ -111,7 +111,7 @@ VOID OnBrowseClick(
 {
     WCHAR szFileName[MAX_PATH + 1];
     LPCWSTR lpOpenDialogFilter =
-        TEXT("Image files (*.exe; *.dll; *.sys)\0*.exe;*.dll;*.sys\0All files (*.*)\0*.*\0\0");
+        TEXT("Image files (*.exe; *.dll; *.sys, *.efi)\0*.exe;*.dll;*.sys;*.efi\0All files (*.*)\0*.*\0\0");
 
     RtlSecureZeroMemory(szFileName, sizeof(szFileName));
     if (supOpenDialogExecute(hwndDlg,
